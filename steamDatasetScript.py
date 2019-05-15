@@ -9,8 +9,6 @@ https://steam.internet.byu.edu/oneill-condensing-steam.pdf or things that cite i
 @author: Rachael Purta
 """
 
-
-
 from io import StringIO
 import re, shutil
 import pandas as pd
@@ -19,6 +17,8 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import scale
 import matplotlib.pyplot as plt
+
+numLinesReadMid = 10000
 
 # for whatever reason, they give the dataset as a mysql dump file, so we need to separate it into
 # tables and make it a csv.  I use the code at https://stackoverflow.com/questions/27584405/how-to-import-a-mysqldump-into-pandas
@@ -97,6 +97,44 @@ def read_dump_short(dump_filename, target_table):
                 break
     return
 
+def read_dump_mid(dump_filename, target_table):
+    sio = StringIO()
+
+    fast_forward = True
+    countRead = 0
+    with open(dump_filename, 'r', encoding="utf8") as f:
+        for line in f:
+            line = line.strip()
+            if line.lower().startswith('insert') and target_table in line:
+                fast_forward = False
+            else:
+                fast_forward = True #added: after we found table, keep going
+            if fast_forward:
+                continue
+            data = re.findall('\([^\)]*\)', line)
+            try:
+                # need to make this a for loop, bc this mysql dump does not separate onto lines
+                for i in range(0,len(data)):
+                    newline = data[i]
+                    newline = newline.strip(' ()')
+                    newline = newline.replace('`', '')
+                    sio.write(newline)
+                    sio.write("\n")
+            except IndexError:
+                pass
+            # added - write to csv, avoids keeping everything in memory...
+            if len(data) > 0:
+                #sio.pos = 0 #bug for later versions of python
+                sio.seek(0)
+                with open (target_table+'_mid.csv', 'a', encoding="utf8") as fd:
+                    shutil.copyfileobj(sio, fd,-1)
+                sio = StringIO() # faster to just make new object than clear?
+            if line.endswith(';'): # comment this out for long version
+                countRead += 1
+                if countRead >= numLinesReadMid:
+                    break;
+    return
+
 if __name__ == "__main__":
     headerSet=['steamid', 'appid','playtime_2weeks','playtime_forever','dateretrieved']
     
@@ -107,9 +145,17 @@ if __name__ == "__main__":
     
     #read_dump('D:/Rachael/Documents/spring2019Chall/steam.sql','Games_2')
     # shorter version of dataset - runs faster
-    read_dump_short('D:/Rachael/Documents/spring2019Chall/steam.sql','Games_2')
-    dfGames2 = pd.read_csv('D:/Rachael/Documents/spring2019Chall/Games_2_short.csv',names=headerSet)
+    #read_dump_short('D:/Rachael/Documents/spring2019Chall/steam.sql','Games_2')
+    #dfGames2 = pd.read_csv('D:/Rachael/Documents/spring2019Chall/Games_2_short.csv',names=headerSet)
+    # longer version - ways to save on memory 1) adding dtypes to everything,
+    #dfGames2 = pd.read_csv('D:/Rachael/Documents/spring2019Chall/Games_2.csv',names=headerSet,dtype={'appid':int,'steamid':int,'playtime_2weeks':object,'playtime_forever':object,'dateretrieved':object})
+    #middle version of dataset - must be small enough to fit in memory, but big as can use
+    # we tune the number of entires here
+    #read_dump_mid('D:/Rachael/Documents/spring2019Chall/steam.sql','Games_2')
+    dfGames2 = pd.read_csv('D:/Rachael/Documents/spring2019Chall/Games_2_mid.csv',names=headerSet,dtype={'appid':int,'steamid':int,'playtime_2weeks':object,'playtime_forever':object,'dateretrieved':object})
     print('games2 length before: ',len(dfGames2))
+    dfGames2 = dfGames2.drop(['playtime_2weeks','dateretrieved'], axis=1)
+    dfGames2['playtime_forever'] = pd.to_numeric(dfGames2['playtime_forever'], errors='coerce')
     
     # get rid of users/games that have a NaN or 0 playtime_forever
     dfGames2 = dfGames2.dropna(subset=['playtime_forever'])
@@ -139,19 +185,28 @@ if __name__ == "__main__":
     reduced_data = PCA(n_components=2).fit_transform(X)
     kmeans = KMeans(n_clusters=2, random_state=0).fit(reduced_data)
     plt.scatter(reduced_data[:,0],reduced_data[:,1], c=kmeans.labels_, cmap='rainbow')
-    plt.savefig('userGroupsByPlaytime.pdf', format='pdf')
+    plt.savefig('userGroupsByPlaytime_med.pdf', format='pdf')
     plt.show()
+    
+    # problem 3: based on clusters in problem 1, are there any patterns in the statistics
+    # between the two classes?
+    Xlabel = np.asarray(list(zip(user_avgs,user_med,user_std,user_gameCount,kmeans.labels_)))
+    statsDf = pd.DataFrame(data=Xlabel,columns=['user_avg','user_med','user_std','user_gameCount','userLabel'])
+    labelAvgs = statsDf.groupby('userLabel')['user_avg'].mean()
+    labelStd = statsDf.groupby('userLabel')['user_avg'].std()
+    gameCountAvgs = statsDf.groupby('userLabel')['user_gameCount'].mean()
+    gameCountStd = statsDf.groupby('userLabel')['user_gameCount'].std()
     
     # problem 2: further characterization of users by creating a normalized vector of play times
     # across all possible games, for each user, then cluster again
-    dfGames2Filt = dfGames2.drop(['playtime_2weeks','dateretrieved'], axis=1)
-    dfGames2Filt = pd.pivot_table(dfGames2Filt, index=['steamid'], columns=['appid'], aggfunc=np.sum, fill_value=0).reset_index()
+    # this is too memory-intense for mid-size file
+    dfGames2Filt = pd.pivot_table(dfGames2, index=['steamid'], columns=['appid'], aggfunc=np.sum, fill_value=0).reset_index()
     dfGames2Filt['playtime_forever'] = dfGames2Filt['playtime_forever'].apply(lambda x: x.map(lambda s: s/x.sum() if(s>0) else 0))
     
     reduced_data2 = PCA(n_components=2).fit_transform(np.asarray(dfGames2Filt))
     kmeans = KMeans(n_clusters=2, random_state=0).fit(reduced_data2)
     plt.scatter(reduced_data2[:,0],reduced_data[:,1], c=kmeans.labels_, cmap='rainbow')
-    plt.savefig('userGroupsByPlaytimeSimilarApps.pdf', format='pdf')
+    plt.savefig('userGroupsByPlaytimeSimilarApps_med.pdf', format='pdf')
     plt.show()
     
     # for later - can't get this table to read properly for some reason
